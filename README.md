@@ -5,49 +5,48 @@ auto-verificável, compilado com [Icarus Verilog](https://steveicarus.github.io/
 
 Instruções suportadas: `lw`, `sw`, `add`, `sub`, `and`, `or`, `slt`, `addi`, `beq`, `jal`.
 
-## Structure
+## Estrutura
 
 ```
 .
-├── Makefile               # build / simulate / view waves / clean
-├── riscvtest.s            # referência em assembly do programa de teste
-├── src/
-│   └── riscvsingle_p1.sv  # design: processador + memórias (programa embutido na imem)
-└── tb/
-    └── tb_riscvsingle.sv  # testbench auto-verificável (módulo `testbench`)
+├── Makefile              # compilar / simular / limpar
+├── riscvtest.s           # programa de teste em assembly (referência)
+├── riscvtest.txt         # mesmo programa em hexadecimal, carregado pela imem
+└── src/
+    └── riscvsingle_p1.sv # testbench + processador + memórias (arquivo único)
 ```
 
-O programa de teste (o mesmo de `riscvtest.s`) já está embutido na `imem`,
-então a simulação não precisa de arquivos externos.
-
-## Usage
+## Uso
 
 ```sh
-make sim    # compile and run the testbench
-make wave   # run simulation and open the VCD waveform in GTKWave
-make clean  # remove build artifacts
+make sim    # compila e executa a simulação
+make clean  # remove os artefatos de build
 ```
 
-Equivalent manual commands:
+Comandos manuais equivalentes (a partir da raiz do projeto):
 
 ```sh
-iverilog -g2012 -o build/testbench.vvp -s testbench src/riscvsingle_p1.sv tb/tb_riscvsingle.sv
-vvp build/testbench.vvp
+iverilog -g2012 -o build/testbench.vvp -s testbench src/riscvsingle_p1.sv
+vvp -n build/testbench.vvp
 ```
 
-## Expected result
+## Resultado esperado
 
-O programa escreve o valor **25** no endereço **100** da memória de dados.
-O testbench imprime:
+O programa de teste termina escrevendo o valor **25** no endereço **100** da
+memória de dados. O testbench verifica essa escrita e imprime:
 
 ```
 Simulation succeeded
 ```
 
-## Notes
+## Notas
 
-- `iverilog -g2012` enables Icarus Verilog's SystemVerilog-2012 support
-  (`logic`, `always_ff`, etc.). The "sorry: constant selects" messages during
-  compilation are harmless warnings from Icarus, not errors.
-- The testbench dumps `tb_riscvsingle.vcd` (via `$dumpfile`/`$dumpvars`),
-  viewable with GTKWave.
+- A `imem` carrega o programa com `$readmemh("riscvtest.txt", RAM)`. O caminho é
+  relativo ao diretório de execução, então rode o `vvp` a partir da raiz do
+  projeto (o Makefile já faz isso).
+- `-g2012` habilita o suporte a SystemVerilog-2012 do Icarus (`logic`,
+  `always_ff`, `always_comb`, etc.).
+- `vvp -n` executa em modo não interativo, fazendo o `$stop` do testbench
+  encerrar a simulação em vez de abrir um prompt.
+- Os avisos `sorry: constant selects in always_* processes...` do Icarus são
+  informativos e não afetam o resultado da simulação.

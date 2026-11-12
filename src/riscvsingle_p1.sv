@@ -1,15 +1,58 @@
+//COMPILE:  iverilog -g2012 -o build/testbench.vvp -s testbench src/riscvsingle_p1.sv
+//SIMULATE: vvp -n build/testbench.vvp   (a partir da raiz do projeto, pois a imem
+//          carrega o programa de riscvtest.txt via $readmemh)
+//          Ou simplesmente: make sim
+
+module testbench();
+
+  logic        clk;
+  logic        reset;
+
+  logic [31:0] WriteData, DataAdr;
+  logic        MemWrite;
+
+  // instantiate device to be tested
+  top dut(clk, reset, WriteData, DataAdr, MemWrite);
+  
+  // initialize test
+  initial
+    begin
+      reset <= 1; # 22; reset <= 0;
+    end
+
+  // generate clock to sequence tests
+  always
+    begin
+      clk <= 1; # 5; clk <= 0; # 5;
+    end
+
+  // check results
+  always @(negedge clk)
+    begin
+      if(MemWrite) begin
+        if(DataAdr === 100 & WriteData === 25) begin
+          $display("Simulation succeeded");
+          $stop;
+        end else if (DataAdr !== 96) begin
+          $display("Simulation failed");
+          $stop;
+        end
+      end
+    end
+endmodule
+
 module top(input  logic        clk, reset, 
            output logic [31:0] WriteData, DataAdr, 
            output logic        MemWrite);
 
   logic [31:0] PC, Instr, ReadData;
   
+  // instantiate processor and memories
   riscvsingle rvsingle(clk, reset, PC, Instr, MemWrite, DataAdr, 
                        WriteData, ReadData);
-  imem imem(PC, Instr);                                
-  dmem dmem(clk, MemWrite, DataAdr, WriteData, ReadData); 
+  imem imem(PC, Instr);
+  dmem dmem(clk, MemWrite, DataAdr, WriteData, ReadData);
 endmodule
-
 
 module riscvsingle(input  logic        clk, reset,
                    output logic [31:0] PC,
@@ -17,25 +60,22 @@ module riscvsingle(input  logic        clk, reset,
                    output logic        MemWrite,
                    output logic [31:0] ALUResult, WriteData,
                    input  logic [31:0] ReadData);
-  // FIX: PCSrc era um fio implícito, o que poderia
-  // causar comportamento indefinido. Agora é declarado explicitamente.
-  logic  ALUSrc, RegWrite, Jump, Zero, PCSrc;
-
+  // ALTERADO: adiciona declaração do PCSrc, antes implícita
+  logic       ALUSrc, PCSrc, RegWrite, Jump, Zero;
   logic [1:0] ResultSrc, ImmSrc;
   logic [2:0] ALUControl;
+
 
   controller c(Instr[6:0], Instr[14:12], Instr[30], Zero,
                ResultSrc, MemWrite, PCSrc,
                ALUSrc, RegWrite, Jump,
                ImmSrc, ALUControl);
-
   datapath dp(clk, reset, ResultSrc, PCSrc,
               ALUSrc, RegWrite,
               ImmSrc, ALUControl,
               Zero, PC, Instr,
               ALUResult, WriteData, ReadData);
 endmodule
-
 
 module controller(input  logic [6:0] op,
                   input  logic [2:0] funct3,
@@ -51,18 +91,16 @@ module controller(input  logic [6:0] op,
   logic [1:0] ALUOp;
   logic       Branch;
 
+
   maindec md(op, ResultSrc, MemWrite, Branch,
              ALUSrc, RegWrite, Jump, ImmSrc, ALUOp);
-
   aludec  ad(op[5], funct3, funct7b5, ALUOp, ALUControl);
 
-  // FIX: O PC deve pegar o PCTarget no caso de
-  // um branch tomado, ou um jal, que é um caso à parte
-  // por não depender de condição. O original ignorava este último,
-  // então o jal não saltava.
-  assign PCSrc = (Branch & Zero) | Jump;
+  // ALTERADO: PCSrc fica em alto quando Jump=1
+  // para que o valor para o PC selecionado por seu
+  // respectivo Mux seja PC+Imm
+  assign PCSrc = Branch & Zero | Jump;
 endmodule
-
 
 module maindec(input  logic [6:0] op,
                output logic [1:0] ResultSrc,
@@ -74,41 +112,25 @@ module maindec(input  logic [6:0] op,
 
   logic [10:0] controls;
 
-  // [CORREÇÃO 1] O original separava apenas 10 bits (sem o Jump no final),
-  // então cada sinal pegava o bit errado de 'controls' e Jump ficava sem valor.
-  // A ordem aqui TEM que ser idêntica à ordem dos bits nas constantes abaixo.
+  // ALTERADO: faltava Jump na concatenação; 10 bits recebendo controls de 11 deslocava todos os sinais em 1 bit
   assign {RegWrite, ImmSrc, ALUSrc, MemWrite,
           ResultSrc, Branch, ALUOp, Jump} = controls;
 
   always_comb
     case(op)
-    // Formato: RegWrite_ImmSrc_ALUSrc_MemWrite_ResultSrc_Branch_ALUOp_Jump
-    //
-    // RegWrite  : 1 = escreve no banco de registradores
-    // ImmSrc    : 00=tipo I, 01=tipo S, 10=tipo B, 11=tipo J
-    // ALUSrc    : 0 = SrcB vem de rs2 ; 1 = SrcB vem do imediato
-    // MemWrite  : 1 = escreve na memória de dados
-    // ResultSrc : 00 = ALUResult, 01 = ReadData (memória), 10 = PC+4
-    // Branch    : 1 = é desvio condicional
-    // ALUOp     : 00 = soma, 01 = subtração, 10 = decidir por funct3/funct7
-    // Jump      : 1 = salto incondicional
-      7'b0000011: controls = 11'b1_00_1_0_01_0_00_0; // lw  (soma base+offset, resultado vem da memória)
-      7'b0100011: controls = 11'b0_01_1_1_00_0_00_0; // sw  (imediato tipo S, escreve na memória)
-      7'b0110011: controls = 11'b1_xx_0_0_00_0_10_0; // R-type (add, sub, and, or, slt)
-      7'b1100011: controls = 11'b0_10_0_0_00_1_01_0; // beq (imediato tipo B, ALU subtrai p/ comparar)
-
-      // [CORREÇÃO 2] Instruções que estavam faltando:
-      7'b0010011: controls = 11'b1_00_1_0_00_0_10_0; // addi / I-type ALU (imediato tipo I, ALUSrc=1)
-      7'b1101111: controls = 11'b1_11_0_0_10_0_00_1; // jal (imediato tipo J, grava PC+4 em rd, Jump=1)
-
-      default:    controls = 11'bx_xx_x_x_xx_x_xx_x; // instrução não implementada
+    // RegWrite_ImmSrc_ALUSrc_MemWrite_ResultSrc_Branch_ALUOp_Jump
+      7'b0000011: controls = 11'b1_00_1_0_01_0_00_0; // lw
+      7'b0100011: controls = 11'b0_01_1_1_00_0_00_0; // sw
+      7'b0110011: controls = 11'b1_xx_0_0_00_0_10_0; // R-type 
+    // ALTERADO: faltava opcode de I-type
+      7'b0010011: controls = 11'b1_00_1_0_00_0_10_0; // I-type 
+      7'b1100011: controls = 11'b0_10_0_0_00_1_01_0; // beq
+    // ALTERADO: faltava opcode do jal
+      7'b1101111: controls = 11'b1_11_0_0_10_0_xx_1; // jal
+      default:    controls = 11'bx_xx_x_x_xx_x_xx_x; // non-implemented instruction
     endcase
 endmodule
 
-
-//==============================================================================
-// ALUDEC: decodificador da ALU. Converte ALUOp/funct3/funct7 em ALUControl
-//==============================================================================
 module aludec(input  logic       opb5,
               input  logic [2:0] funct3,
               input  logic       funct7b5, 
@@ -116,15 +138,13 @@ module aludec(input  logic       opb5,
               output logic [2:0] ALUControl);
 
   logic  RtypeSub;
-  // sub só existe em R-type (opb5=1) com funct7[5]=1.
-  // Em addi (opb5=0) o bit 30 faz parte do imediato, então NÃO pode virar sub.
-  assign RtypeSub = funct7b5 & opb5;
+  assign RtypeSub = funct7b5 & opb5;  // TRUE for R-type subtract instruction
 
   always_comb
     case(ALUOp)
-      2'b00:                ALUControl = 3'b000; // soma (lw, sw, jal)
-      2'b01:                ALUControl = 3'b001; // subtração (beq)
-      default: case(funct3) // R-type ou I-type: depende do funct3
+      2'b00:                ALUControl = 3'b000; // addition
+      2'b01:                ALUControl = 3'b001; // subtraction
+      default: case(funct3) // R-type or I-type ALU
                  3'b000:  if (RtypeSub) 
                             ALUControl = 3'b001; // sub
                           else          
@@ -132,11 +152,10 @@ module aludec(input  logic       opb5,
                  3'b010:    ALUControl = 3'b101; // slt, slti
                  3'b110:    ALUControl = 3'b011; // or, ori
                  3'b111:    ALUControl = 3'b010; // and, andi
-                 default:   ALUControl = 3'bxxx; // não implementado
+                 default:   ALUControl = 3'bxxx; // ???
                endcase
     endcase
 endmodule
-
 
 module datapath(input  logic        clk, reset,
                 input  logic [1:0]  ResultSrc, 
@@ -155,31 +174,24 @@ module datapath(input  logic        clk, reset,
   logic [31:0] SrcA, SrcB;
   logic [31:0] Result;
 
-  // ---- lógica do próximo PC ----
-  flopr #(32) pcreg(clk, reset, PCNext, PC);   
-  adder       pcadd4(PC, 32'd4, PCPlus4);      
-  adder       pcaddbranch(PC, ImmExt, PCTarget); 
+  // next PC logic
+  flopr #(32) pcreg(clk, reset, PCNext, PC); 
+  adder       pcadd4(PC, 32'd4, PCPlus4);
+  adder       pcaddbranch(PC, ImmExt, PCTarget);
   mux2 #(32)  pcmux(PCPlus4, PCTarget, PCSrc, PCNext);
+ 
+  // register file logic
+  regfile     rf(clk, RegWrite, Instr[19:15], Instr[24:20], 
+                 Instr[11:7], Result, SrcA, WriteData);
+  extend      ext(Instr[31:7], ImmSrc, ImmExt);
 
-  regfile rf(clk, RegWrite, Instr[19:15], Instr[24:20], 
-            Instr[11:7], Result, SrcA, WriteData);
-
-  extend ext(Instr[31:7], ImmSrc, ImmExt);
-
-  mux2 #(32)  srcbmux(WriteData, ImmExt, ALUSrc, SrcB); // SrcB = rs2 ou imediato
-
-  
+  // ALU logic
+  mux2 #(32)  srcbmux(WriteData, ImmExt, ALUSrc, SrcB);
   alu         alu(SrcA, SrcB, ALUControl, ALUResult, Zero);
 
-  // [CORREÇÃO 5] Mux do resultado que volta para o banco de registradores:
-  //   00 -> ALUResult  (R-type, addi)
-  //   01 -> ReadData   (lw)
-  //   10 -> PCPlus4    (jal: rd recebe o endereço de retorno)
-  // O original tinha 32'b0 na terceira entrada, então o jal gravava 0 em rd
-  // (e o sw final usava o endereço errado).
+  // ALTERADO: troca o terceiro parâmetro por PCPlus4 para instruções do tipo J
   mux3 #(32)  resultmux(ALUResult, ReadData, PCPlus4, ResultSrc, Result);
 endmodule
-
 
 module regfile(input  logic        clk, 
                input  logic        we3, 
@@ -189,9 +201,10 @@ module regfile(input  logic        clk,
 
   logic [31:0] rf[31:0];
 
-  // Duas portas de leitura combinacionais (A1/RD1, A2/RD2).
-  // Uma porta de escrita síncrona, na borda de subida do clock (A3/WD3/WE3).
-  // O registrador x0 é sempre 0.
+  // three ported register file
+  // read two ports combinationally (A1/RD1, A2/RD2)
+  // write third port on rising edge of clock (A3/WD3/WE3)
+  // register 0 hardwired to 0
 
   always_ff @(posedge clk)
     if (we3) rf[a3] <= wd3;	
@@ -200,71 +213,43 @@ module regfile(input  logic        clk,
   assign rd2 = (a2 != 0) ? rf[a2] : 0;
 endmodule
 
-
-
-//==============================================================================
-// ADDER: somador simples de 32 bits
-//==============================================================================
 module adder(input  [31:0] a, b,
              output [31:0] y);
 
   assign y = a + b;
 endmodule
 
-
-//==============================================================================
-// EXTEND: gerador de imediato (extensão de sinal). Cada tipo de instrução
-// guarda o imediato em bits diferentes; aqui ele é remontado em 32 bits.
-//==============================================================================
 module extend(input  logic [31:7] instr,
               input  logic [1:0]  immsrc,
               output logic [31:0] immext);
  
   always_comb
     case(immsrc) 
-      // [CORREÇÃO 4] Faltavam os casos 00 (tipo I) e 10 (tipo B).
-
-      // Tipo I (addi, lw): imm[11:0] = instr[31:20]
+      // ALTERADO: faltava lidar com instruções type-I
+      // e S, que encodificam o valor imediato de formas
+      // diferentes
+      // Type I
       2'b00:   immext = {{20{instr[31]}}, instr[31:20]};
-
-      // Tipo S (sw): imm[11:5] = instr[31:25], imm[4:0] = instr[11:7]
+      // Type S 
       2'b01:   immext = {{20{instr[31]}}, instr[31:25], instr[11:7]}; 
-
-      // Tipo B (beq): imm[12|10:5|4:1|11], bit 0 sempre 0 (múltiplo de 2)
+      // Type B
       2'b10:   immext = {{20{instr[31]}}, instr[7], instr[30:25], instr[11:8], 1'b0};
-
-      // Tipo J (jal): imm[20|10:1|11|19:12], bit 0 sempre 0
+      // Type J
       2'b11:   immext = {{12{instr[31]}}, instr[19:12], instr[20], instr[30:21], 1'b0}; 
-
-      default: immext = 32'bx; // indefinido
+      default: immext = 32'bx; // undefined
     endcase             
 endmodule
 
-
-module register #(parameter WIDTH = 8)
-              (input  logic clk, reset, we,
+module flopr #(parameter WIDTH = 8)
+              (input  logic             clk, reset,
                input  logic [WIDTH-1:0] d, 
                output logic [WIDTH-1:0] q);
-  always_ff @(posedge clk, posedge reset)
-    if      (reset) q <= 0;
-    else if (we)    q <= d;
-endmodule
-
-
-module flopr #(parameter width = 8)
-              (input  logic    clk, reset,
-               input  logic [width-1:0] d, 
-               output logic [width-1:0] q);
 
   always_ff @(posedge clk, posedge reset)
-    if (reset) q <= 0;   // reset zera o pc (programa começa no endereço 0)
+    if (reset) q <= 0;
     else       q <= d;
 endmodule
 
-
-//==============================================================================
-// MUX2: multiplexador de 2 entradas (s=0 -> d0, s=1 -> d1)
-//==============================================================================
 module mux2 #(parameter WIDTH = 8)
              (input  logic [WIDTH-1:0] d0, d1, 
               input  logic             s, 
@@ -273,10 +258,6 @@ module mux2 #(parameter WIDTH = 8)
   assign y = s ? d1 : d0; 
 endmodule
 
-
-//==============================================================================
-// MUX3: multiplexador de 3 entradas (00 -> d0, 01 -> d1, 1x -> d2)
-//==============================================================================
 module mux3 #(parameter WIDTH = 8)
              (input  logic [WIDTH-1:0] d0, d1, d2,
               input  logic [1:0]       s, 
@@ -285,69 +266,29 @@ module mux3 #(parameter WIDTH = 8)
   assign y = s[1] ? d2 : (s[0] ? d1 : d0); 
 endmodule
 
-
-//==============================================================================
-// IMEM: memória de instruções (somente leitura).
-// O programa de teste (o mesmo do riscvtest.s) está embutido aqui, para que
-// a simulação funcione sem arquivos externos.
-// Cada posição RAM[i] guarda a instrução do endereço 4*i (PC/4).
-//==============================================================================
 module imem(input  logic [31:0] a,
             output logic [31:0] rd);
 
   logic [31:0] RAM[63:0];
 
   initial
-    begin
-      //             código de máquina    assembly                  endereço  efeito
-      RAM[0]  = 32'h00500113; // addi x2, x0, 5          // 0x00  x2 = 5
-      RAM[1]  = 32'h00C00193; // addi x3, x0, 12         // 0x04  x3 = 12
-      RAM[2]  = 32'hFF718393; // addi x7, x3, -9         // 0x08  x7 = 3
-      RAM[3]  = 32'h0023E233; // or   x4, x7, x2         // 0x0C  x4 = 3 OR 5 = 7
-      RAM[4]  = 32'h0041F2B3; // and  x5, x3, x4         // 0x10  x5 = 12 AND 7 = 4
-      RAM[5]  = 32'h004282B3; // add  x5, x5, x4         // 0x14  x5 = 4 + 7 = 11
-      RAM[6]  = 32'h02728863; // beq  x5, x7, end        // 0x18  não desvia (11 != 3)
-      RAM[7]  = 32'h0041A233; // slt  x4, x3, x4         // 0x1C  x4 = (12 < 7) = 0
-      RAM[8]  = 32'h00020463; // beq  x4, x0, around     // 0x20  desvia (x4 == 0)
-      RAM[9]  = 32'h00000293; // addi x5, x0, 0          // 0x24  (pulada)
-      RAM[10] = 32'h0023A233; // slt  x4, x7, x2         // 0x28  x4 = (3 < 5) = 1
-      RAM[11] = 32'h005203B3; // add  x7, x4, x5         // 0x2C  x7 = 1 + 11 = 12
-      RAM[12] = 32'h402383B3; // sub  x7, x7, x2         // 0x30  x7 = 12 - 5 = 7
-      RAM[13] = 32'h0471AA23; // sw   x7, 84(x3)         // 0x34  mem[96] = 7
-      RAM[14] = 32'h06002103; // lw   x2, 96(x0)         // 0x38  x2 = mem[96] = 7
-      RAM[15] = 32'h005104B3; // add  x9, x2, x5         // 0x3C  x9 = 7 + 11 = 18
-      RAM[16] = 32'h008001EF; // jal  x3, end            // 0x40  x3 = 0x44, PC = 0x48
-      RAM[17] = 32'h00100113; // addi x2, x0, 1          // 0x44  (pulada)
-      RAM[18] = 32'h00910133; // add  x2, x2, x9         // 0x48  x2 = 7 + 18 = 25
-      RAM[19] = 32'h0221A023; // sw   x2, 0x20(x3)       // 0x4C  mem[68+32=100] = 25
-      RAM[20] = 32'h00210063; // beq  x2, x2, done       // 0x50  loop infinito
-    end
+      $readmemh("riscvtest.txt",RAM);
 
-  assign rd = RAM[a[31:2]]; // endereço alinhado em palavra: descarta os 2 bits baixos
+  assign rd = RAM[a[31:2]]; // word aligned
 endmodule
 
-
-//==============================================================================
-// DMEM: memória de dados. Leitura combinacional, escrita síncrona (sw).
-//==============================================================================
 module dmem(input  logic        clk, we,
             input  logic [31:0] a, wd,
             output logic [31:0] rd);
 
   logic [31:0] RAM[63:0];
 
-  assign rd = RAM[a[31:2]]; // endereço alinhado em palavra
+  assign rd = RAM[a[31:2]]; // word aligned
 
   always_ff @(posedge clk)
     if (we) RAM[a[31:2]] <= wd;
 endmodule
 
-
-//==============================================================================
-// ALU: unidade lógica e aritmética
-//   alucontrol: 000 add | 001 sub | 010 and | 011 or
-//               100 xor | 101 slt | 110 sll | 111 srl
-//==============================================================================
 module alu(input  logic [31:0] a, b,
            input  logic [2:0]  alucontrol,
            output logic [31:0] result,
@@ -355,9 +296,8 @@ module alu(input  logic [31:0] a, b,
 
   logic [31:0] condinvb, sum;
   logic        v;              // overflow
-  logic        isAddSub;       // verdadeiro quando é soma ou subtração
+  logic        isAddSub;       // true when is add or subtract operation
 
-  // Subtração = a + (~b) + 1: inverte b e usa alucontrol[0] como carry-in
   assign condinvb = alucontrol[0] ? ~b : b;
   assign sum = a + condinvb + alucontrol[0];
   assign isAddSub = ~alucontrol[2] & ~alucontrol[1] |
@@ -370,15 +310,13 @@ module alu(input  logic [31:0] a, b,
       3'b010:  result = a & b;       // and
       3'b011:  result = a | b;       // or
       3'b100:  result = a ^ b;       // xor
-      3'b101:  result = sum[31] ^ v; // slt (sinal da subtração, corrigido por overflow)
+      3'b101:  result = sum[31] ^ v; // slt
       3'b110:  result = a << b[4:0]; // sll
       3'b111:  result = a >> b[4:0]; // srl
       default: result = 32'bx;
     endcase
 
-  // Zero = 1 quando o resultado é 0 (usado pelo beq: a - b == 0 -> a == b)
   assign zero = (result == 32'b0);
-  // Overflow da soma/subtração com sinal
   assign v = ~(alucontrol[0] ^ a[31] ^ b[31]) & (a[31] ^ sum[31]) & isAddSub;
   
 endmodule

@@ -28,6 +28,15 @@
 //   RdM, RegWriteM    = EX/MEM.RegisterRd, EX/MEM.RegWrite
 //   RdW, RegWriteW    = MEM/WB.RegisterRd, MEM/WB.RegWrite
 
+// =======================================================================
+//  TESTBENCH (fornecido pelo professor, sem alterações de lógica)
+// =======================================================================
+// Gera o clock (período de 10 unidades) e o reset, e observa as escritas
+// na memória de dados. O programa riscvtest.s deve terminar escrevendo 25
+// no endereço 100. Escritas no endereço 96 são permitidas (é o sw
+// intermediário do programa); qualquer outra escrita indica erro.
+// Como as saídas de top são as do estágio MEM, o teste funciona igual no
+// monociclo e no pipeline: só muda em qual ciclo a escrita acontece.
 module testbench();
 
   logic        clk;
@@ -66,6 +75,12 @@ module testbench();
     end
 endmodule
 
+// =======================================================================
+//  TOP: processador + memória de instruções + memória de dados
+// =======================================================================
+// Memórias separadas para instruções e dados (como no slide 66): a imem é
+// lida no estágio IF e a dmem é acessada no estágio MEM, então as duas
+// podem ser usadas no mesmo ciclo sem hazard estrutural.
 module top(input  logic        clk, reset,
            output logic [31:0] WriteData, DataAdr,
            output logic        MemWrite);
@@ -81,6 +96,14 @@ module top(input  logic        clk, reset,
   dmem dmem(clk, MemWrite, DataAdr, WriteData, ReadData);
 endmodule
 
+// =======================================================================
+//  PROCESSADOR PIPELINE: unidade de controle + datapath
+// =======================================================================
+// Interface igual à do monociclo (riscvsingle):
+//   PC        -> endereço buscado na imem (estágio IF)
+//   Instr     <- instrução lida da imem (estágio IF)
+//   MemWrite, ALUResult (endereço), WriteData -> dmem (estágio MEM)
+//   ReadData  <- dado lido da dmem (estágio MEM)
 module riscvpipelined(input  logic        clk, reset,
                       output logic [31:0] PC,
                       input  logic [31:0] Instr,
@@ -112,6 +135,16 @@ module riscvpipelined(input  logic        clk, reset,
               MemWrite, ALUResult, WriteData, ReadData);
 endmodule
 
+// =======================================================================
+//  CONTROLLER ("Control", a elipse azul no slide 66)
+// =======================================================================
+// Decodifica a instrução que está em ID e gera os sinais de controle. No
+// pipeline esses sinais não são usados todos de uma vez: cada um viaja
+// pelos registradores de pipeline junto com a sua instrução e é usado no
+// estágio certo (ImmSrc/Branch/Jump em ID; ALUSrc/ALUControl em EX;
+// MemWrite em MEM; RegWrite/ResultSrc em WB).
+// É dividido, como no monociclo, em decodificador principal (maindec) e
+// decodificador da ALU (aludec).
 // ALTERADO: removidos Zero, PCSrc e a lógica de desvio; agora em ID (datapath)
 module controller(input  logic [6:0] op,
                   input  logic [2:0] funct3,
@@ -130,6 +163,21 @@ module controller(input  logic [6:0] op,
   aludec  ad(op[5], funct3, funct7b5, ALUOp, ALUControl);
 endmodule
 
+// -----------------------------------------------------------------------
+//  Decodificador principal: gera os sinais de controle a partir do opcode
+// -----------------------------------------------------------------------
+//   RegWrite  : 1 = a instrução escreve em rd                     (usado em WB)
+//   ImmSrc    : formato do imediato: 00 I, 01 S, 10 B, 11 J        (usado em ID)
+//   ALUSrc    : 2º operando da ALU: 0 = rs2, 1 = imediato          (usado em EX)
+//   MemWrite  : 1 = escreve na memória de dados (sw)               (usado em MEM)
+//   ResultSrc : valor escrito em rd: 00 = ALU, 01 = memória (lw),
+//               10 = PC+4 (jal)                                    (usado em WB)
+//   Branch    : 1 = beq; decidido pelo comparador "=" em ID         (usado em ID)
+//   ALUOp     : 00 = soma (endereço de lw/sw), 01 = subtração (beq),
+//               10 = operação definida por funct3/funct7 (aludec)   (usado em ID)
+//   Jump      : 1 = jal; sempre tomado, decidido em ID              (usado em ID)
+// Obs.: no pipeline o beq não usa mais a ALU (a comparação é feita pelo
+// "=" em ID); o ALUOp = 01 do beq ficou só por compatibilidade.
 module maindec(input  logic [6:0] op,
                output logic [1:0] ResultSrc,
                output logic       MemWrite,
@@ -156,6 +204,16 @@ module maindec(input  logic [6:0] op,
     endcase
 endmodule
 
+// -----------------------------------------------------------------------
+//  Decodificador da ALU: escolhe a operação (ALUControl) da ALU
+// -----------------------------------------------------------------------
+//   ALUOp = 00 -> soma (cálculo de endereço de lw/sw)
+//   ALUOp = 01 -> subtração (beq)
+//   ALUOp = 10 -> R-type ou I-type: a operação vem de funct3; para
+//                 funct3 = 000, funct7[5] separa add (0) de sub (1).
+// opb5 (bit 5 do opcode) diferencia R-type (1) de I-type (0): no addi o
+// bit 30 faz parte do imediato e não pode ser lido como "sub".
+// Códigos de ALUControl: 000 add, 001 sub, 010 and, 011 or, 101 slt.
 module aludec(input  logic       opb5,
               input  logic [2:0] funct3,
               input  logic       funct7b5,
@@ -163,7 +221,7 @@ module aludec(input  logic       opb5,
               output logic [2:0] ALUControl);
 
   logic  RtypeSub;
-  assign RtypeSub = funct7b5 & opb5;  // TRUE for R-type subtract instruction
+  assign RtypeSub = funct7b5 & opb5;  // 1 somente para o sub do tipo R
 
   always_comb
     case(ALUOp)
@@ -460,6 +518,15 @@ module hazard_detection_unit(input  logic [4:0] Rs1D, Rs2D, // IF/ID.RegisterRs1
   assign CtrlMuxSel =  stall;
 endmodule
 
+// =======================================================================
+//  BANCO DE REGISTRADORES ("Registers" no slide 66)
+// =======================================================================
+// 32 registradores de 32 bits, com 3 portas:
+//   - 2 portas de leitura combinacionais (a1 -> rd1, a2 -> rd2), usadas
+//     pela instrução em ID (rs1 e rs2);
+//   - 1 porta de escrita na borda de subida (a3, wd3, we3), usada pela
+//     instrução em WB (rd, ResultW, RegWriteW).
+// O registrador x0 sempre lê 0.
 module regfile(input  logic        clk,
                input  logic        we3,
                input  logic [ 4:0] a1, a2, a3,
@@ -467,11 +534,6 @@ module regfile(input  logic        clk,
                output logic [31:0] rd1, rd2);
 
   logic [31:0] rf[31:0];
-
-  // three ported register file
-  // read two ports combinationally (A1/RD1, A2/RD2)
-  // write third port on rising edge of clock (A3/WD3/WE3)
-  // register 0 hardwired to 0
 
   always_ff @(posedge clk)
     if (we3) rf[a3] <= wd3;
@@ -484,27 +546,38 @@ module regfile(input  logic        clk,
   assign rd2 = (a2 != 0) ? ((we3 & (a2 == a3)) ? wd3 : rf[a2]) : 0;
 endmodule
 
+// Somador de 32 bits: usado para PC+4 (IF) e para o alvo PC+imediato (ID).
 module adder(input  [31:0] a, b,
              output [31:0] y);
 
   assign y = a + b;
 endmodule
 
+// =======================================================================
+//  GERADOR DE IMEDIATO ("Imm Gen" no slide 66)
+// =======================================================================
+// Monta o imediato de 32 bits com extensão de sinal (instr[31] é sempre o
+// bit de sinal). Cada formato espalha os bits do imediato de um jeito
+// diferente na instrução, por isso o ImmSrc escolhe a montagem.
+// Nos tipos B e J o bit 0 do deslocamento é sempre 0 (instruções têm
+// endereço par), e por isso não é guardado na instrução: aqui ele é
+// recolocado com o 1'b0 no fim. Isso faz o papel do "Shift left 1" que
+// aparece antes do somador de desvio no slide 66.
 module extend(input  logic [31:7] instr,
               input  logic [1:0]  immsrc,
               output logic [31:0] immext);
 
   always_comb
     case(immsrc)
-      // Type I
+      // Tipo I (addi, lw): imm[11:0] = instr[31:20]
       2'b00:   immext = {{20{instr[31]}}, instr[31:20]};
-      // Type S
+      // Tipo S (sw): imm[11:5] = instr[31:25], imm[4:0] = instr[11:7]
       2'b01:   immext = {{20{instr[31]}}, instr[31:25], instr[11:7]};
-      // Type B
+      // Tipo B (beq): imm[12|10:5|4:1|11], bit 0 = 0
       2'b10:   immext = {{20{instr[31]}}, instr[7], instr[30:25], instr[11:8], 1'b0};
-      // Type J
+      // Tipo J (jal): imm[20|10:1|11|19:12], bit 0 = 0
       2'b11:   immext = {{12{instr[31]}}, instr[19:12], instr[20], instr[30:21], 1'b0};
-      default: immext = 32'bx; // undefined
+      default: immext = 32'bx; // formato não definido
     endcase
 endmodule
 
@@ -524,6 +597,9 @@ module flopenrc #(parameter WIDTH = 8, parameter [WIDTH-1:0] RESETVAL = 0)
     end
 endmodule
 
+// Multiplexador 2:1 parametrizável: s = 0 -> d0, s = 1 -> d1.
+// Usado no mux do PC, no ALUSrc, no mux "0" de controle e nas entradas
+// do comparador "=".
 module mux2 #(parameter WIDTH = 8)
              (input  logic [WIDTH-1:0] d0, d1,
               input  logic             s,
@@ -532,6 +608,9 @@ module mux2 #(parameter WIDTH = 8)
   assign y = s ? d1 : d0;
 endmodule
 
+// Multiplexador 3:1 parametrizável: s = 00 -> d0, 01 -> d1, 1x -> d2.
+// Usado nos muxes de forwarding de EX (ForwardA/ForwardB) e no mux de
+// resultado de WB (ALU / memória / PC+4).
 module mux3 #(parameter WIDTH = 8)
              (input  logic [WIDTH-1:0] d0, d1, d2,
               input  logic [1:0]       s,
@@ -540,6 +619,12 @@ module mux3 #(parameter WIDTH = 8)
   assign y = s[1] ? d2 : (s[0] ? d1 : d0);
 endmodule
 
+// =======================================================================
+//  MEMÓRIA DE INSTRUÇÕES ("Instruction memory" no slide 66)
+// =======================================================================
+// 64 palavras de 32 bits, carregadas do arquivo riscvtest.txt (hexa).
+// Leitura combinacional: a instrução do endereço PC sai no mesmo ciclo.
+// a[31:2] converte endereço em bytes para índice de palavra (alinhado).
 module imem(input  logic [31:0] a,
             output logic [31:0] rd);
 
@@ -548,32 +633,47 @@ module imem(input  logic [31:0] a,
   initial
       $readmemh("riscvtest.txt",RAM);
 
-  assign rd = RAM[a[31:2]]; // word aligned
+  assign rd = RAM[a[31:2]]; // acesso alinhado em palavra
 endmodule
 
+// =======================================================================
+//  MEMÓRIA DE DADOS ("Data memory" no slide 66)
+// =======================================================================
+// 64 palavras de 32 bits. Leitura combinacional (lw recebe o dado ainda no
+// estágio MEM) e escrita na borda de subida quando we = 1 (sw).
 module dmem(input  logic        clk, we,
             input  logic [31:0] a, wd,
             output logic [31:0] rd);
 
   logic [31:0] RAM[63:0];
 
-  assign rd = RAM[a[31:2]]; // word aligned
+  assign rd = RAM[a[31:2]]; // acesso alinhado em palavra
 
   always_ff @(posedge clk)
     if (we) RAM[a[31:2]] <= wd;
 endmodule
 
+// =======================================================================
+//  ALU ("ALU" no estágio EX do slide 66)
+// =======================================================================
+// Operações (alucontrol): 000 add, 001 sub, 010 and, 011 or, 100 xor,
+// 101 slt, 110 sll, 111 srl.
+// Soma e subtração usam o mesmo somador: na subtração b é invertido e
+// soma-se 1 (complemento de 2), ou seja, a - b = a + ~b + 1.
+// slt: a < b se o sinal de (a - b) for 1, corrigido pelo overflow (v).
+// zero = 1 quando o resultado é 0 (não é mais usado pelo beq, que agora
+// compara em ID, mas foi mantido do monociclo).
 module alu(input  logic [31:0] a, b,
            input  logic [2:0]  alucontrol,
            output logic [31:0] result,
            output logic        zero);
 
   logic [31:0] condinvb, sum;
-  logic        v;              // overflow
-  logic        isAddSub;       // true when is add or subtract operation
+  logic        v;              // overflow da soma/subtração
+  logic        isAddSub;       // 1 quando a operação é add ou sub
 
-  assign condinvb = alucontrol[0] ? ~b : b;
-  assign sum = a + condinvb + alucontrol[0];
+  assign condinvb = alucontrol[0] ? ~b : b;      // inverte b na subtração
+  assign sum = a + condinvb + alucontrol[0];     // +1 completa o complemento de 2
   assign isAddSub = ~alucontrol[2] & ~alucontrol[1] |
                     ~alucontrol[1] & alucontrol[0];
 

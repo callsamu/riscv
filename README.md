@@ -1,9 +1,31 @@
 # sv_project
 
-Processador RISC-V **monociclo** (Parte 1) em SystemVerilog, com testbench
-auto-verificável, compilado com [Icarus Verilog](https://steveicarus.github.io/iverilog/).
+Processador RISC-V **pipeline de 5 estágios** (Parte 2) em SystemVerilog, com
+testbench auto-verificável, compilado com [Icarus Verilog](https://steveicarus.github.io/iverilog/).
+Implementa o datapath do **slide 66** da aula de pipeline (Patterson & Hennessy,
+Fig. 4.61), a partir do monociclo da Parte 1.
 
 Instruções suportadas: `lw`, `sw`, `add`, `sub`, `and`, `or`, `slt`, `addi`, `beq`, `jal`.
+
+## Arquitetura (slide 66)
+
+| Elemento da figura | No código |
+|---|---|
+| Registradores IF/ID, ID/EX, EX/MEM, MEM/WB | `flopenrc` (com enable para stall e clear para flush) |
+| Control | `controller` (`maindec` + `aludec`), opera sobre a instrução em ID |
+| Mux "0" antes de ID/EX | `ctrlmux`: zera os sinais de controle para criar uma bolha |
+| Hazard detection unit | `hazard_detection_unit`: gera `PCWrite`, `IFIDWrite` e o seletor do mux "0" |
+| Comparador "=" e somador de alvo em ID | `EqualD` e `pcaddbranch`: `beq`/`jal` decididos em ID |
+| IF.Flush | `IFFlush`: desvio tomado descarta a instrução buscada (IF/ID vira nop) |
+| Forwarding unit | bloco `always_comb` em EX: `ForwardAE`/`ForwardBE` (EX/MEM e MEM/WB) |
+
+Custo dos hazards:
+
+- Dependência entre instruções da ALU: 0 ciclos (forwarding).
+- Carga-uso (`lw` seguido de uso): 1 stall.
+- `beq` logo após uma instrução da ALU que escreve o registrador comparado: 1 stall.
+- `beq` logo após um `lw` do registrador comparado: 2 stalls.
+- Desvio tomado ou `jal`: 1 bolha (IF.Flush). Desvio não tomado: 0 ciclos.
 
 ## Estrutura
 
@@ -13,7 +35,7 @@ Instruções suportadas: `lw`, `sw`, `add`, `sub`, `and`, `or`, `slt`, `addi`, `
 ├── riscvtest.s           # programa de teste em assembly (referência)
 ├── riscvtest.txt         # mesmo programa em hexadecimal, carregado pela imem
 └── src/
-    └── riscvsingle_p1.sv # testbench + processador + memórias (arquivo único)
+    └── riscvsingle_p1.sv # testbench + processador pipeline + memórias (arquivo único)
 ```
 
 ## Uso
